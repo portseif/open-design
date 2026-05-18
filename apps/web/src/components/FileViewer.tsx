@@ -4018,6 +4018,17 @@ function HtmlViewer({
   const [hasLazySrcDocTransport, setHasLazySrcDocTransport] = useState(useUrlLoadPreview);
   const [srcDocTransportResetKey, setSrcDocTransportResetKey] = useState(0);
   const wasUrlLoadPreviewRef = useRef(useUrlLoadPreview);
+  // True once the srcDoc iframe's lazy-transport bootstrap has fired its
+  // initial onLoad. The activation effect must wait for this — posting the
+  // `od:srcdoc-transport-activate` message BEFORE the iframe parses its
+  // inline `<script data-od-lazy-srcdoc-transport>` lands in the air with no
+  // listener installed yet, and the iframe sits on the 536-byte bootstrap
+  // forever (white preview). Re-firing onLoad after each `document.write`
+  // does NOT reset this back to false — by then the bootstrap listener (or
+  // the equivalent listener injected by `injectSrcdocTransportActivationBridge`
+  // into the full srcDoc) has been installed on `window` and persists across
+  // subsequent document rewrites.
+  const [srcDocTransportReady, setSrcDocTransportReady] = useState(false);
   useEffect(() => {
     if (useUrlLoadPreview) setHasLazySrcDocTransport(true);
   }, [useUrlLoadPreview]);
@@ -4037,13 +4048,19 @@ function HtmlViewer({
       activatedSrcDocTransportHtmlRef.current = null;
       if (!wasUrlLoadPreviewRef.current) {
         setSrcDocTransportResetKey((key) => key + 1);
+        setSrcDocTransportReady(false);
       }
       wasUrlLoadPreviewRef.current = true;
       return;
     }
     wasUrlLoadPreviewRef.current = false;
+    // Gate the post on the iframe's first onLoad. Without this gate the
+    // post races the bootstrap script's `window.addEventListener('message')`
+    // call and gets dropped — symptom: lazy bootstrap stays at 536 bytes,
+    // preview renders blank white.
+    if (!srcDocTransportReady) return;
     activateSrcDocTransport();
-  }, [activateSrcDocTransport, useUrlLoadPreview]);
+  }, [activateSrcDocTransport, useUrlLoadPreview, srcDocTransportReady]);
   useEffect(() => {
     restorePreviewScrollPosition();
   }, [boardMode, manualEditMode, srcDoc, restorePreviewScrollPosition]);
@@ -6096,6 +6113,12 @@ function HtmlViewer({
                       onLoad={() => {
                         const frame = srcDocPreviewIframeRef.current;
                         if (!useUrlLoadPreview) iframeRef.current = frame;
+                        // Unblock the activation effect on the first
+                        // bootstrap load. Subsequent onLoad fires (one per
+                        // document.write into the iframe) keep the flag
+                        // true — there is no need to re-race the listener
+                        // install once it is up.
+                        setSrcDocTransportReady(true);
                         activateSrcDocTransport(frame);
                         dcViewportRestoreAtRef.current = Date.now();
                         frame?.contentWindow?.postMessage({
